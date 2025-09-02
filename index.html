@@ -35,15 +35,16 @@
     <style>
         body {
             font-family: 'Noto Sans TC', sans-serif;
-            touch-action: none; /* 防止在行動裝置上觸控時滾動頁面 */
-            overscroll-behavior: none; /* 禁止 pull-to-refresh */
+            touch-action: none;
+            overscroll-behavior: none;
         }
         .tower-button.selected {
-            background-color: #f59e0b; /* Amber 500 */
-            border-color: #d97706; /* Amber 600 */
+            background-color: #f59e0b;
+            border-color: #d97706;
         }
         canvas {
             cursor: crosshair;
+            display: block; /* 移除 canvas 下方的空隙 */
         }
     </style>
 </head>
@@ -52,33 +53,18 @@
     <div class="w-full max-w-4xl mx-auto">
         <h1 class="text-3xl font-bold text-center mb-4 text-amber-300">守城遊戲：入門版</h1>
 
-        <!-- 遊戲主容器 -->
         <div class="flex flex-col lg:flex-row gap-4">
-
-            <!-- 遊戲畫面 -->
             <div class="flex-grow bg-gray-900 rounded-lg shadow-2xl overflow-hidden border-4 border-gray-700">
                 <canvas id="gameCanvas"></canvas>
             </div>
 
-            <!-- 控制面板 -->
             <div class="lg:w-64 flex-shrink-0 bg-gray-900 p-4 rounded-lg shadow-2xl border-4 border-gray-700 flex flex-col gap-4">
                 <div id="stats" class="text-lg space-y-3">
-                    <div class="flex justify-between items-center bg-gray-700 p-2 rounded-md">
-                        <span class="font-bold text-red-400">❤️ 生命:</span>
-                        <span id="health">20</span>
-                    </div>
-                    <div class="flex justify-between items-center bg-gray-700 p-2 rounded-md">
-                        <span class="font-bold text-yellow-400">💰 金幣:</span>
-                        <span id="money">100</span>
-                    </div>
-                    <div class="flex justify-between items-center bg-gray-700 p-2 rounded-md">
-                        <span class="font-bold text-cyan-400">🌊 波次:</span>
-                        <span id="wave">0</span>
-                    </div>
+                    <div class="flex justify-between items-center bg-gray-700 p-2 rounded-md"><span class="font-bold text-red-400">❤️ 生命:</span><span id="health">20</span></div>
+                    <div class="flex justify-between items-center bg-gray-700 p-2 rounded-md"><span class="font-bold text-yellow-400">💰 金幣:</span><span id="money">100</span></div>
+                    <div class="flex justify-between items-center bg-gray-700 p-2 rounded-md"><span class="font-bold text-cyan-400">🌊 波次:</span><span id="wave">0</span></div>
                 </div>
-
                 <hr class="border-gray-600">
-
                 <div id="tower-selection" class="space-y-3">
                     <h2 class="text-xl font-bold text-center text-amber-300">建造防禦塔</h2>
                     <button id="tower1" class="tower-button w-full text-left p-3 bg-gray-700 hover:bg-amber-600 rounded-lg border-2 border-gray-600 transition-all duration-200">
@@ -86,13 +72,8 @@
                         <p class="text-sm text-gray-300">基礎的遠程攻擊單位。</p>
                     </button>
                 </div>
-                
                 <hr class="border-gray-600">
-
-                <button id="startWaveButton" class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-4 rounded-lg shadow-lg transition-transform transform hover:scale-105">
-                    開始下一波
-                </button>
-                
+                <button id="startWaveButton" class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-4 rounded-lg shadow-lg transition-transform transform hover:scale-105">開始下一波</button>
                 <div id="messageBox" class="text-center font-bold text-xl h-10"></div>
             </div>
         </div>
@@ -102,10 +83,17 @@
         // --- PWA Service Worker 註冊 ---
         if ('serviceWorker' in navigator) {
             const swContent = `
-                const CACHE_NAME = 'tower-defense-cache-v1';
+                const CACHE_NAME = 'tower-defense-cache-v2'; // 更新快取版本
                 const urlsToCache = ['/', 'https://cdn.tailwindcss.com', 'https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;700&display=swap'];
-                self.addEventListener('install', event => { event.waitUntil(caches.open(CACHE_NAME).then(cache => { return cache.addAll(urlsToCache); })); });
-                self.addEventListener('fetch', event => { event.respondWith(caches.match(event.request).then(response => { return response || fetch(event.request); })); });
+                self.addEventListener('install', e => e.waitUntil(caches.open(CACHE_NAME).then(c => c.addAll(urlsToCache))));
+                self.addEventListener('fetch', e => e.respondWith(caches.match(e.request).then(r => r || fetch(e.request))));
+                // 清除舊快取
+                self.addEventListener('activate', event => {
+                  const cacheWhitelist = [CACHE_NAME];
+                  event.waitUntil(caches.keys().then(cacheNames => Promise.all(cacheNames.map(cacheName => {
+                    if (cacheWhitelist.indexOf(cacheName) === -1) { return caches.delete(cacheName); }
+                  }))));
+                });
             `;
             const swBlob = new Blob([swContent], { type: 'application/javascript' });
             navigator.serviceWorker.register(URL.createObjectURL(swBlob)).then(reg => console.log('SW registration successful:', reg.scope)).catch(err => console.log('SW registration failed:', err));
@@ -120,8 +108,14 @@
         const startWaveButton = document.getElementById('startWaveButton');
         const towerButton1 = document.getElementById('tower1');
         const messageBox = document.getElementById('messageBox');
-        const TILE_SIZE = 40;
-        let cols, rows;
+        
+        const TILE_SIZE = 40; // 邏輯上的格子大小
+        let cols = 20, rows = 15;
+        let scale = 1; // 實際渲染的縮放比例
+
+        // *** 效能優化：建立一個離屏(offscreen)畫布來預先渲染背景 ***
+        const backgroundCanvas = document.createElement('canvas');
+        const backgroundCtx = backgroundCanvas.getContext('2d');
 
         const path = [
             { x: 0, y: 5 }, { x: 1, y: 5 }, { x: 2, y: 5 }, { x: 3, y: 5 }, { x: 3, y: 4 }, { x: 3, y: 3 }, { x: 3, y: 2 }, { x: 4, y: 2 }, { x: 5, y: 2 }, { x: 6, y: 2 },
@@ -131,119 +125,124 @@
         ];
 
         let health = 20, money = 100, wave = 0, enemies = [], towers = [], projectiles = [], selectedTowerType = null, gameRunning = false;
+        
+        // 類別定義 (Enemy, Tower, Projectile) 維持不變...
+        class Enemy { /* ... 內容和之前一樣 ... */ constructor(h,s,r){this.x=path[0].x*TILE_SIZE+TILE_SIZE/2;this.y=path[0].y*TILE_SIZE+TILE_SIZE/2;this.pathIndex=0;this.maxHealth=h;this.health=h;this.speed=s;this.reward=r;this.size=12}move(){if(this.pathIndex>=path.length-1){health--;this.health=0;updateStats();return}const t=path[this.pathIndex+1],e=t.x*TILE_SIZE+TILE_SIZE/2,i=t.y*TILE_SIZE+TILE_SIZE/2,h=e-this.x,s=i-this.y,r=Math.sqrt(h*h+s*s);r<this.speed?this.pathIndex++:(this.x+=h/r*this.speed,this.y+=s/r*this.speed)}draw(){ctx.fillStyle="red",ctx.beginPath(),ctx.arc(this.x,this.y,this.size,0,2*Math.PI),ctx.fill(),ctx.fillStyle="black",ctx.fillRect(this.x-this.size,this.y-this.size-8,2*this.size,5),ctx.fillStyle="green",ctx.fillRect(this.x-this.size,this.y-this.size-8,2*this.size*(this.health/this.maxHealth),5)}}
+        class Tower { /* ... 內容和之前一樣 ... */ constructor(t,e,i,h,s){this.x=t*TILE_SIZE+TILE_SIZE/2,this.y=e*TILE_SIZE+TILE_SIZE/2,this.range=i,this.fireRate=h,this.damage=s,this.fireCooldown=0,this.size=.8*TILE_SIZE}findTarget(){for(let t of enemies){const e=t.x-this.x,i=t.y-this.y;if(Math.sqrt(e*e+i*i)<=this.range)return t}return null}update(){this.fireCooldown>0&&this.fireCooldown--;const t=this.findTarget();t&&this.fireCooldown<=0&&(this.shoot(t),this.fireCooldown=this.fireRate)}shoot(t){projectiles.push(new Projectile(this.x,this.y,t,this.damage))}draw(){ctx.fillStyle="cyan",ctx.fillRect(this.x-this.size/2,this.y-this.size/2,this.size,this.size)}}
+        class Projectile { /* ... 內容和之前一樣 ... */ constructor(t,e,i,h){this.x=t,this.y=e,this.target=i,this.damage=h,this.speed=5,this.size=5}move(){if(!this.target||this.target.health<=0){this.damage=0;return}const t=this.target.x-this.x,e=this.target.y-this.y,i=Math.sqrt(t*t+e*e);i<this.speed?this.hitTarget():(this.x+=t/i*this.speed,this.y+=e/i*this.speed)}hitTarget(){this.target&&(this.target.health-=this.damage,this.target.health<=0&&(money+=this.target.reward,updateStats())),this.damage=0}draw(){ctx.fillStyle="yellow",ctx.beginPath(),ctx.arc(this.x,this.y,this.size,0,2*Math.PI),ctx.fill()}}
 
-        class Enemy {
-            constructor(health, speed, reward) {
-                this.x = path[0].x * TILE_SIZE + TILE_SIZE / 2;
-                this.y = path[0].y * TILE_SIZE + TILE_SIZE / 2;
-                this.pathIndex = 0;
-                this.maxHealth = health; this.health = health; this.speed = speed; this.reward = reward; this.size = 12;
-            }
-            move() {
-                if (this.pathIndex >= path.length - 1) { health--; this.health = 0; updateStats(); return; }
-                const target = path[this.pathIndex + 1];
-                const targetX = target.x * TILE_SIZE + TILE_SIZE / 2, targetY = target.y * TILE_SIZE + TILE_SIZE / 2;
-                const dx = targetX - this.x, dy = targetY - this.y;
-                const distance = Math.sqrt(dx * dx + dy * dy);
-                if (distance < this.speed) { this.pathIndex++; } else { this.x += (dx / distance) * this.speed; this.y += (dy / distance) * this.speed; }
-            }
-            draw() {
-                ctx.fillStyle = 'red'; ctx.beginPath(); ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2); ctx.fill();
-                ctx.fillStyle = 'black'; ctx.fillRect(this.x - this.size, this.y - this.size - 8, this.size * 2, 5);
-                ctx.fillStyle = 'green'; ctx.fillRect(this.x - this.size, this.y - this.size - 8, this.size * 2 * (this.health / this.maxHealth), 5);
-            }
-        }
-
-        class Tower {
-            constructor(x, y, range, fireRate, damage) {
-                this.x = x * TILE_SIZE + TILE_SIZE / 2; this.y = y * TILE_SIZE + TILE_SIZE / 2;
-                this.range = range; this.fireRate = fireRate; this.damage = damage; this.fireCooldown = 0; this.size = TILE_SIZE * 0.8;
-            }
-            findTarget() { for (let enemy of enemies) { const dx = enemy.x - this.x, dy = enemy.y - this.y; if (Math.sqrt(dx * dx + dy * dy) <= this.range) return enemy; } return null; }
-            update() { if (this.fireCooldown > 0) this.fireCooldown--; const target = this.findTarget(); if (target && this.fireCooldown <= 0) { this.shoot(target); this.fireCooldown = this.fireRate; } }
-            shoot(target) { projectiles.push(new Projectile(this.x, this.y, target, this.damage)); }
-            draw() { ctx.fillStyle = 'cyan'; ctx.fillRect(this.x - this.size / 2, this.y - this.size / 2, this.size, this.size); }
-        }
-
-        class Projectile {
-            constructor(x, y, target, damage) { this.x = x; this.y = y; this.target = target; this.damage = damage; this.speed = 5; this.size = 5; }
-            move() {
-                if (!this.target || this.target.health <= 0) { this.damage = 0; return; }
-                const dx = this.target.x - this.x, dy = this.target.y - this.y;
-                const distance = Math.sqrt(dx * dx + dy * dy);
-                if (distance < this.speed) { this.hitTarget(); } else { this.x += (dx / distance) * this.speed; this.y += (dy / distance) * this.speed; }
-            }
-            hitTarget() { if (this.target) { this.target.health -= this.damage; if (this.target.health <= 0) { money += this.target.reward; updateStats(); } } this.damage = 0; }
-            draw() { ctx.fillStyle = 'yellow'; ctx.beginPath(); ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2); ctx.fill(); }
-        }
-
+        // --- 遊戲主要功能 (已優化) ---
         function setupCanvas() {
             const container = canvas.parentElement;
             const containerWidth = container.clientWidth;
-            cols = 20; rows = 15;
-            const ratio = (rows * TILE_SIZE) / (cols * TILE_SIZE);
-            canvas.width = containerWidth; canvas.height = containerWidth * ratio;
-            const newTileSize = containerWidth / cols;
-            ctx.scale(newTileSize / TILE_SIZE, newTileSize / TILE_SIZE);
+            
+            // 根據容器寬度計算縮放比例
+            scale = containerWidth / (cols * TILE_SIZE);
+
+            canvas.width = containerWidth;
+            canvas.height = rows * TILE_SIZE * scale;
+
+            // 設定主畫布的縮放，這樣我們的繪圖邏輯可以繼續使用 TILE_SIZE
+            ctx.scale(scale, scale);
+
+            // *** 效能優化：只在尺寸改變時，重繪背景到離屏畫布 ***
+            drawBackground();
         }
 
-        function drawGrid() { for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) { ctx.strokeStyle = '#374151'; ctx.strokeRect(x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE); } }
-        function drawPath() { ctx.fillStyle = '#4b5563'; path.forEach(p => ctx.fillRect(p.x * TILE_SIZE, p.y * TILE_SIZE, TILE_SIZE, TILE_SIZE)); }
-        function updateStats() { healthEl.textContent = health; moneyEl.textContent = money; waveEl.textContent = wave; }
+        // *** 效能優化：這是一個新函式，負責繪製靜態背景 ***
+        function drawBackground() {
+            backgroundCanvas.width = cols * TILE_SIZE;
+            backgroundCanvas.height = rows * TILE_SIZE;
 
+            // 在背景畫布上繪製格子
+            for (let y = 0; y < rows; y++) {
+                for (let x = 0; x < cols; x++) {
+                    backgroundCtx.strokeStyle = '#374151'; // gray-700
+                    backgroundCtx.strokeRect(x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+                }
+            }
+            
+            // 在背景畫布上繪製路徑
+            backgroundCtx.fillStyle = '#4b5563'; // gray-600
+            path.forEach(p => {
+                backgroundCtx.fillRect(p.x * TILE_SIZE, p.y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+            });
+        }
+        
+        function updateStats() { /* ... 內容和之前一樣 ... */ healthEl.textContent=health;moneyEl.textContent=money;waveEl.textContent=wave;}
+
+        // *** 效能優化：遊戲主循環現在變得更高效 ***
         function gameLoop() {
             if (!gameRunning) return;
-            const scaleFactor = TILE_SIZE / (canvas.width / cols);
-            ctx.clearRect(0, 0, canvas.width * scaleFactor, canvas.height * scaleFactor);
-            drawGrid(); drawPath();
+
+            // 1. 清除畫布 (只需清除可見部分)
+            ctx.clearRect(0, 0, canvas.width / scale, canvas.height / scale);
+
+            // 2. 繪製背景 (從離屏畫布一次性貼上，非常快！)
+            ctx.drawImage(backgroundCanvas, 0, 0);
+
+            // 3. 更新與繪製動態物件 (敵人、塔、投射物)
             enemies.forEach(e => { e.move(); e.draw(); });
             towers.forEach(t => { t.update(); t.draw(); });
             projectiles.forEach(p => { p.move(); p.draw(); });
+            
+            // 4. 移除死亡/失效的物件
             enemies = enemies.filter(e => e.health > 0);
             projectiles = projectiles.filter(p => p.damage > 0);
+
+            // 5. 檢查遊戲狀態
             if (health <= 0) { gameOver("遊戲結束！"); return; }
-            if (gameRunning && enemies.length === 0) { startWaveButton.disabled = false; startWaveButton.className = startWaveButton.className.replace(/bg-gray-500|cursor-not-allowed/g, 'bg-green-600 hover:bg-green-700'); }
+            if (gameRunning && enemies.length === 0) {
+                 startWaveButton.disabled = false;
+                 startWaveButton.className = startWaveButton.className.replace(/bg-gray-500|cursor-not-allowed/g, 'bg-green-600 hover:bg-green-700');
+            }
+
+            // 6. 請求下一幀動畫
             requestAnimationFrame(gameLoop);
         }
 
-        function startNextWave() {
-            wave++; updateStats();
-            startWaveButton.disabled = true;
-            startWaveButton.className += ' bg-gray-500 cursor-not-allowed';
-            const enemyCount = wave * 5, enemyHealth = 50 + wave * 10, enemySpeed = 1 + wave * 0.1, enemyReward = 5 + wave;
-            for (let i = 0; i < enemyCount; i++) { setTimeout(() => enemies.push(new Enemy(enemyHealth, enemySpeed, enemyReward)), i * 500); }
-            if (!gameRunning) { gameRunning = true; gameLoop(); }
-        }
-
+        function startNextWave() { /* ... 內容和之前一樣 ... */ wave++;updateStats();startWaveButton.disabled=!0;startWaveButton.className+=" bg-gray-500 cursor-not-allowed";const t=5*wave,e=50+10*wave,i=1+.1*wave,h=5+wave;for(let s=0;s<t;s++)setTimeout(()=>{enemies.push(new Enemy(e,i,h))},500*s);gameRunning||(gameRunning=!0,gameLoop())}
+        
         function placeTower(event) {
             if (!selectedTowerType) { showMessage("請先選擇要建造的塔！", "orange"); return; }
+            
             const rect = canvas.getBoundingClientRect();
             const touch = event.touches ? event.touches[0] : event;
-            const scaleFactor = TILE_SIZE / (canvas.width / cols);
-            const mouseX = (touch.clientX - rect.left) * (canvas.width / rect.width) * scaleFactor;
-            const mouseY = (touch.clientY - rect.top) * (canvas.height / rect.height) * scaleFactor;
-            const gridX = Math.floor(mouseX / TILE_SIZE), gridY = Math.floor(mouseY / TILE_SIZE);
+            // 根據縮放比例，計算回原始的邏輯座標
+            const mouseX = (touch.clientX - rect.left) / scale;
+            const mouseY = (touch.clientY - rect.top) / scale;
+            const gridX = Math.floor(mouseX / TILE_SIZE);
+            const gridY = Math.floor(mouseY / TILE_SIZE);
+
+            if (gridX < 0 || gridX >= cols || gridY < 0 || gridY >= rows) return; // 防止點擊到畫布外
             if (path.some(p => p.x === gridX && p.y === gridY)) { showMessage("不能蓋在路上！", "red"); return; }
             if (towers.some(t => Math.floor(t.x / TILE_SIZE) === gridX && Math.floor(t.y / TILE_SIZE) === gridY)) { showMessage("這裡已經有塔了！", "red"); return; }
             const towerCost = 50;
             if (money < towerCost) { showMessage("金幣不足！", "red"); return; }
             money -= towerCost; updateStats();
-            towers.push(new Tower(gridX, gridY, 120, 60, 20));
+            towers.push(new Tower(gridX, gridY, 120, 60, 20)); // x, y, 範圍, 射速(幀), 傷害
             selectedTowerType = null; towerButton1.classList.remove('selected');
         }
 
-        function selectTowerType() { selectedTowerType = selectedTowerType === 'arrow' ? null : 'arrow'; towerButton1.classList.toggle('selected'); }
-        function showMessage(msg, color = "white") { messageBox.textContent = msg; messageBox.style.color = color; setTimeout(() => messageBox.textContent = "", 2000); }
-        function gameOver(msg) { gameRunning = false; showMessage(msg, 'red'); startWaveButton.disabled = true; startWaveButton.textContent = "重新整理以開始"; }
+        // 其他函式維持不變...
+        function selectTowerType() { /* ... 內容和之前一樣 ... */ selectedTowerType="arrow"===selectedTowerType?null:"arrow",towerButton1.classList.toggle("selected")}
+        function showMessage(t,e="white") { /* ... 內容和之前一樣 ... */ messageBox.textContent=t,messageBox.style.color=e,setTimeout(()=>{messageBox.textContent=""},2e3)}
+        function gameOver(t) { /* ... 內容和之前一樣 ... */ gameRunning=!1,showMessage(t,"red"),startWaveButton.disabled=!0,startWaveButton.textContent="重新整理以開始"}
 
+        // --- 事件監聽 ---
         startWaveButton.addEventListener('click', startNextWave);
         canvas.addEventListener('click', placeTower);
         canvas.addEventListener('touchstart', (e) => { e.preventDefault(); placeTower(e); }, { passive: false });
         towerButton1.addEventListener('click', selectTowerType);
         window.addEventListener('resize', setupCanvas);
 
-        function init() { setupCanvas(); updateStats(); drawGrid(); drawPath(); }
+        // --- 遊戲初始化 ---
+        function init() {
+            setupCanvas();
+            updateStats();
+        }
         init();
     </script>
 </body>
 </html>
+
